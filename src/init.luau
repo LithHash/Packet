@@ -44,6 +44,7 @@ export type eventConfig = {
 	rateLimit: number?,
 	debounce: number?,
 	unreliable: boolean?,
+	polling: boolean?,
 }
 
 export type requestConfig = {
@@ -62,6 +63,8 @@ export type event<T...> = {
 	sendToList: (self: event<T...>, players: { Player }, T...) -> (),
 	broadcast: (self: event<T...>, T...) -> (),
 	onReceive: (self: event<T...>, callback: (T...) -> ()) -> connection,
+
+	iterate: (self: event<T...>) -> () -> (Player?, T...),
 }
 
 export type request<T..., R...> = {
@@ -147,6 +150,10 @@ local function hashName(name: string): string
 	return string.format("%08X", hash)
 end
 
+local function isNaN(value: any): boolean
+    return value ~= value
+end
+
 local function getValueType(value: any): packetType
     local luaType: string = typeof(value)
 
@@ -171,7 +178,55 @@ local function validateSchema(name: string, schema: {packetType}, args: {any}): 
             continue
         end
 
-        local actualType: packetType = getValueType(args[i])
+        local value: any = args[i]
+        local actualType: packetType = getValueType(value)
+
+        if actualType == "number" and isNaN(value) then
+            return false, `[{name}] argument {i}: NaN is not allowed`
+        end
+
+        if actualType == "vector3" then
+            local vec: Vector3 = value
+            if isNaN(vec.X) or isNaN(vec.Y) or isNaN(vec.Z) then
+                return false, `[{name}] argument {i}: Vector3 contains NaN`
+            end
+        end
+
+        if actualType == "vector2" then
+            local vec: Vector2 = value
+            if isNaN(vec.X) or isNaN(vec.Y) then
+                return false, `[{name}] argument {i}: Vector2 contains NaN`
+            end
+        end
+
+        if actualType == "cframe" then
+            local cf: CFrame = value
+            local x, y, z = cf.X, cf.Y, cf.Z
+            if isNaN(x) or isNaN(y) or isNaN(z) then
+                return false, `[{name}] argument {i}: CFrame contains NaN`
+            end
+        end
+
+        if actualType == "color3" then
+            local col: Color3 = value
+            if isNaN(col.R) or isNaN(col.G) or isNaN(col.B) then
+                return false, `[{name}] argument {i}: Color3 contains NaN`
+            end
+        end
+
+        if actualType == "udim" then
+            local ud: UDim = value
+            if isNaN(ud.Scale) or isNaN(ud.Offset) then
+                return false, `[{name}] argument {i}: UDim contains NaN`
+            end
+        end
+
+        if actualType == "udim2" then
+            local ud2: UDim2 = value
+            if isNaN(ud2.X.Scale) or isNaN(ud2.X.Offset) or isNaN(ud2.Y.Scale) or isNaN(ud2.Y.Offset) then
+                return false, `[{name}] argument {i}: UDim2 contains NaN`
+            end
+        end
 
         if expectedType == "instance" and typeof(args[i]) == "Instance" then
             continue
@@ -303,10 +358,13 @@ end
 local function createEvent<T...>(name: string, config: eventConfig): event<T...>
 	local direction: direction = config.direction
 	local useUnreliable: boolean = config.unreliable == true
+	local usePolling: boolean = config.polling == true
 	local remoteName: string = hashName(name)
 
 	local reliableRemote: RemoteEvent?
 	local unreliableRemote: UnreliableRemoteEvent?
+
+	local pollingBuffer: {{ player: Player?, args: { any } }} = {}
 
 	if isServer then
 		if useUnreliable then
@@ -371,6 +429,44 @@ local function createEvent<T...>(name: string, config: eventConfig): event<T...>
 			return reliableRemote.OnClientEvent
 		end
 		return (unreliableRemote :: UnreliableRemoteEvent).OnClientEvent
+	end
+
+	if usePolling then
+		if direction == "toServer" then
+			assert(context == "server", `[{name}] polling mode for toServer events requires server context`)
+
+			getServerSignal():Connect(function(player: Player, ...: any)
+				local args: { any } = table.pack(...)
+
+				local allowed: boolean, limitErr: string? = checkLimit(player)
+				if not allowed then
+					warn(`[{name}] {player.Name}: {limitErr or "rate limited"}`)
+					return
+				end
+
+				local valid: boolean, schemaErr: string? = validateSchema(name, schema, args)
+				if not valid then
+					warn(schemaErr)
+					return
+				end
+
+				table.insert(pollingBuffer, { player = player, args = args })
+			end)
+		else
+			assert(context == "client", `[{name}] polling mode for toClient events requires client context`)
+
+			getClientSignal():Connect(function(...: any)
+				local args: { any } = table.pack(...)
+
+				local valid: boolean, schemaErr: string? = validateSchema(name, schema, args)
+				if not valid then
+					warn(schemaErr)
+					return
+				end
+
+				table.insert(pollingBuffer, { player = nil, args = args })
+			end)
+		end
 	end
 
 	return {
@@ -469,6 +565,19 @@ local function createEvent<T...>(name: string, config: eventConfig): event<T...>
 			end)
 
 			return wrapConnection(rbxConnection)
+		end,
+
+		iterate = function(_self: event<T...>): () -> (Player?, T...)
+			assert(usePolling, `[{name}] iterate() requires polling = true in config`)
+
+			return function(): (Player?, T...)
+				local event = table.remove(pollingBuffer, 1)
+				if not event then
+					return nil :: any
+				end
+
+				return event.player, table.unpack(event.args)
+			end
 		end,
 	}
 end
