@@ -432,9 +432,7 @@ local function createEvent<T...>(name: string, config: eventConfig): event<T...>
 	end
 
 	if usePolling then
-		if direction == "toServer" then
-			assert(context == "server", `[{name}] polling mode for toServer events requires server context`)
-
+		if direction == "toServer" and context == "server" then
 			getServerSignal():Connect(function(player: Player, ...: any)
 				local args: { any } = table.pack(...)
 
@@ -452,9 +450,7 @@ local function createEvent<T...>(name: string, config: eventConfig): event<T...>
 
 				table.insert(pollingBuffer, { player = player, args = args })
 			end)
-		else
-			assert(context == "client", `[{name}] polling mode for toClient events requires client context`)
-
+		elseif direction == "toClient" and context == "client" then
 			getClientSignal():Connect(function(...: any)
 				local args: { any } = table.pack(...)
 
@@ -569,6 +565,12 @@ local function createEvent<T...>(name: string, config: eventConfig): event<T...>
 
 		iterate = function(_self: event<T...>): () -> (Player?, T...)
 			assert(usePolling, `[{name}] iterate() requires polling = true in config`)
+
+			if direction == "toServer" then
+				assert(context == "server", `[{name}] iterate() for toServer events can only be called from the server`)
+			else
+				assert(context == "client", `[{name}] iterate() for toClient events can only be called from the client`)
+			end
 
 			return function(): (Player?, T...)
 				local event = table.remove(pollingBuffer, 1)
