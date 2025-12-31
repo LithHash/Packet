@@ -64,7 +64,7 @@ export type event<T...> = {
 	broadcast: (self: event<T...>, T...) -> (),
 	onReceive: (self: event<T...>, callback: (T...) -> ()) -> connection,
 
-	iterate: (self: event<T...>) -> () -> (Player?, T...),
+	iterate: (self: event<T...>) -> () -> (number, Player?, T...),
 }
 
 export type request<T..., R...> = {
@@ -563,7 +563,7 @@ local function createEvent<T...>(name: string, config: eventConfig): event<T...>
 			return wrapConnection(rbxConnection)
 		end,
 
-		iterate = function(_self: event<T...>): () -> (Player?, T...)
+		iterate = function(_self: event<T...>): () -> (number, Player?, T...)
 			assert(usePolling, `[{name}] iterate() requires polling = true in config`)
 
 			if direction == "toServer" then
@@ -572,13 +572,16 @@ local function createEvent<T...>(name: string, config: eventConfig): event<T...>
 				assert(context == "client", `[{name}] iterate() for toClient events can only be called from the client`)
 			end
 
-			return function(): (Player?, T...)
+			local index: number = 0
+
+			return function(): (number, Player?, T...)
 				local event = table.remove(pollingBuffer, 1)
 				if not event then
 					return nil :: any
 				end
 
-				return event.player, table.unpack(event.args)
+				index += 1
+				return index, event.player, table.unpack(event.args)
 			end
 		end,
 	}
