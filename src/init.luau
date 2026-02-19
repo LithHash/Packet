@@ -18,10 +18,10 @@ local scratchBuffer = buffer.create(MAX_PACKET_BYTES + 256)
 
 export type direction = "toServer" | "toClient"
 export type packetType =
-	| "string" | "number" | "boolean" | "nil" | "buffer"
-	| "instance" | "cframe" | "vector3" | "vector2" | "color3"
-	| "brickColor" | "udim" | "udim2" | "enum" | "enumItem" | "unknown"
-	| "function" | "thread" | "userdata" | "vector"
+    | "string" | "number" | "boolean" | "nil" | "buffer"
+    | "instance" | "cframe" | "vector3" | "vector2" | "color3"
+    | "brickColor" | "udim" | "udim2" | "enum" | "enumItem" | "unknown"
+    | "function" | "thread" | "userdata" | "vector" | "variant"
 export type structDef = {
 	_kind: "struct",
 	fields: { { key: string, type: fieldType } },
@@ -430,6 +430,156 @@ local function compilePrimitive(primitiveType: packetType): compiledType
 			end,
 		}
 	end
+
+ 	if primitiveType == "variant" then
+        return {
+            write = function(targetBuffer: buffer, offset: number, value: any): number
+                local t = typeof(value)
+
+                if value == nil then
+                    buffer.writeu8(targetBuffer, offset, 0)  -- nil
+                    return offset + 1
+                elseif t == "number" then
+                    buffer.writeu8(targetBuffer, offset, 1)
+                    buffer.writef64(targetBuffer, offset + 1, value)
+                    return offset + 1 + 8
+                elseif t == "boolean" then
+                    buffer.writeu8(targetBuffer, offset, 2)
+                    buffer.writeu8(targetBuffer, offset + 1, value and 1 or 0)
+                    return offset + 1 + 1
+                elseif t == "string" then
+                    local len = #value
+                    if len > STRING_BYTE_LIMIT then
+                        warn("[packet] variant string too long, truncated")
+                        value = string.sub(value, 1, STRING_BYTE_LIMIT)
+                        len = #value
+                    end
+                    buffer.writeu8(targetBuffer, offset, 3)
+                    buffer.writeu16(targetBuffer, offset + 1, len)
+                    buffer.writestring(targetBuffer, offset + 3, value)
+                    return offset + 3 + len
+                elseif t == "Vector3" then
+                    buffer.writeu8(targetBuffer, offset, 4)
+                    buffer.writef32(targetBuffer, offset + 1, value.X)
+                    buffer.writef32(targetBuffer, offset + 5, value.Y)
+                    buffer.writef32(targetBuffer, offset + 9, value.Z)
+                    return offset + 1 + 12
+                elseif t == "Vector2" then
+                    buffer.writeu8(targetBuffer, offset, 5)
+                    buffer.writef32(targetBuffer, offset + 1, value.X)
+                    buffer.writef32(targetBuffer, offset + 5, value.Y)
+                    return offset + 1 + 8
+                elseif t == "CFrame" then
+                    buffer.writeu8(targetBuffer, offset, 6)
+                    local axis, angle = value:ToAxisAngle()
+                    local half = angle * 0.5
+                    local s = math.sin(half)
+                    buffer.writef32(targetBuffer, offset + 1, value.X)
+                    buffer.writef32(targetBuffer, offset + 5, value.Y)
+                    buffer.writef32(targetBuffer, offset + 9, value.Z)
+                    buffer.writef32(targetBuffer, offset + 13, math.cos(half))
+                    buffer.writef32(targetBuffer, offset + 17, axis.X * s)
+                    buffer.writef32(targetBuffer, offset + 21, axis.Y * s)
+                    buffer.writef32(targetBuffer, offset + 25, axis.Z * s)
+                    return offset + 1 + 28
+                elseif t == "Color3" then
+                    buffer.writeu8(targetBuffer, offset, 7)
+                    buffer.writeu8(targetBuffer, offset + 1, math.round(value.R * 255))
+                    buffer.writeu8(targetBuffer, offset + 2, math.round(value.G * 255))
+                    buffer.writeu8(targetBuffer, offset + 3, math.round(value.B * 255))
+                    return offset + 1 + 3
+                elseif t == "buffer" then
+                    local len = buffer.len(value)
+                    buffer.writeu8(targetBuffer, offset, 8)
+                    buffer.writeu32(targetBuffer, offset + 1, len)
+                    buffer.copy(targetBuffer, offset + 5, value, 0, len)
+                    return offset + 5 + len
+                elseif t == "table" then
+                    buffer.writeu8(targetBuffer, offset, 9)
+                    local count = #value
+                    buffer.writeu16(targetBuffer, offset + 1, count)
+                    local newOffset = offset + 1 + 2
+                    for i = 1, count do
+                        local sub = compilePrimitive("variant")
+                        newOffset = sub.write(targetBuffer, newOffset, value[i])
+                    end
+                    return newOffset
+
+                else
+                    warn(`[packet] variant: unsupported type '{t}' — sent as nil`)
+                    buffer.writeu8(targetBuffer, offset, 0)
+                    return offset + 1
+                end
+            end,
+
+            read = function(sourceBuffer: buffer, offset: number): (any, number)
+                local tag = buffer.readu8(sourceBuffer, offset)
+                offset += 1
+
+                if tag == 0 then return nil, offset end
+                if tag == 1 then return buffer.readf64(sourceBuffer, offset), offset + 8 end
+                if tag == 2 then return buffer.readu8(sourceBuffer, offset) == 1, offset + 1 end
+
+                if tag == 3 then
+                    local len = buffer.readu16(sourceBuffer, offset)
+                    local str = buffer.readstring(sourceBuffer, offset + 2, len)
+                    return str, offset + 2 + len
+                end
+
+                if tag == 4 then
+                    local x = buffer.readf32(sourceBuffer, offset)
+                    local y = buffer.readf32(sourceBuffer, offset + 4)
+                    local z = buffer.readf32(sourceBuffer, offset + 8)
+                    return Vector3.new(x, y, z), offset + 12
+                end
+
+                if tag == 5 then
+                    local x = buffer.readf32(sourceBuffer, offset)
+                    local y = buffer.readf32(sourceBuffer, offset + 4)
+                    return Vector2.new(x, y), offset + 8
+                end
+
+                if tag == 6 then
+                    local px = buffer.readf32(sourceBuffer, offset)
+                    local py = buffer.readf32(sourceBuffer, offset + 4)
+                    local pz = buffer.readf32(sourceBuffer, offset + 8)
+                    local qw = buffer.readf32(sourceBuffer, offset + 12)
+                    local qx = buffer.readf32(sourceBuffer, offset + 16)
+                    local qy = buffer.readf32(sourceBuffer, offset + 20)
+                    local qz = buffer.readf32(sourceBuffer, offset + 24)
+                    return CFrame.new(px, py, pz, qw, qx, qy, qz), offset + 28
+                end
+
+                if tag == 7 then
+                    local r = buffer.readu8(sourceBuffer, offset)
+                    local g = buffer.readu8(sourceBuffer, offset + 1)
+                    local b = buffer.readu8(sourceBuffer, offset + 2)
+                    return Color3.fromRGB(r, g, b), offset + 3
+                end
+
+                if tag == 8 then
+                    local len = buffer.readu32(sourceBuffer, offset)
+                    local buf = buffer.create(len)
+                    buffer.copy(buf, 0, sourceBuffer, offset + 4, len)
+                    return buf, offset + 4 + len
+                end
+
+                if tag == 9 then
+                    local count = buffer.readu16(sourceBuffer, offset)
+                    offset += 2
+                    local arr = table.create(count)
+                    local sub = compilePrimitive("variant")
+                    for i = 1, count do
+                        arr[i], offset = sub.read(sourceBuffer, offset)
+                    end
+                    return arr, offset
+                end
+
+                warn(`[packet] variant: unknown tag {tag} — returning nil`)
+                return nil, offset
+            end,
+        }
+    end
 
 	return {
 		fixedSize = 0,
@@ -1308,5 +1458,6 @@ return table.freeze({
 		thread = "thread" :: packetType,
 		userdata = "userdata" :: packetType,
 		vector = "vector" :: packetType,
+	    variant = "variant" :: packetType,
 	}),
 })
