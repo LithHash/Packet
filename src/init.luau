@@ -488,6 +488,22 @@ local function compilePrimitive(primitiveType: packetType): compiledType
                     buffer.writeu8(targetBuffer, offset + 2, math.round(value.G * 255))
                     buffer.writeu8(targetBuffer, offset + 3, math.round(value.B * 255))
                     return offset + 1 + 3
+                elseif t == "Instance" then
+                    buffer.writeu8(targetBuffer, offset, 10)
+
+                    local instancePath = value:GetFullName()
+                    local pathLen = #instancePath
+
+                    if pathLen > STRING_BYTE_LIMIT then
+                        warn("[packet] variant Instance path too long (>512 bytes)")
+                        buffer.writeu8(targetBuffer, offset, 0)
+                        return offset + 1
+                    end
+
+                    buffer.writeu16(targetBuffer, offset + 1, pathLen)
+                    buffer.writestring(targetBuffer, offset + 3, instancePath)
+
+                    return offset + 3 + pathLen
                 elseif t == "buffer" then
                     local len = buffer.len(value)
                     buffer.writeu8(targetBuffer, offset, 8)
@@ -573,6 +589,34 @@ local function compilePrimitive(primitiveType: packetType): compiledType
                         arr[i], offset = sub.read(sourceBuffer, offset)
                     end
                     return arr, offset
+                end
+
+                if tag == 10 then
+                    local pathLen = buffer.readu16(sourceBuffer, offset)
+                    local instancePath = buffer.readstring(sourceBuffer, offset + 2, pathLen)
+                    local resolved: Instance? = game
+
+                    for _, part in string.split(instancePath, ".") do
+                        if not resolved then break end
+                        resolved = resolved:FindFirstChild(part)
+                    end
+
+                    if resolved and resolved ~= game then
+                        local isAllowed = false
+                        for _, root in INSTANCE_ROOTS do
+                            if resolved:IsDescendantOf(root) then
+                                isAllowed = true
+                                break
+                            end
+                        end
+
+                        if not isAllowed then
+                            warn(`[packet] variant Instance path '{instancePath}' outside allowed roots — rejected as nil`)
+                            return nil, offset + 2 + pathLen
+                        end
+                    end
+
+                    return resolved, offset + 2 + pathLen
                 end
 
                 warn(`[packet] variant: unknown tag {tag} — returning nil`)
@@ -832,9 +876,8 @@ local function validateValue(
 	end
 
 	local expectedType = fieldDef :: packetType
-
-	if expectedType == "unknown" then
-		return true, nil
+	if expectedType == "unknown" or expectedType == "variant" then
+	    return true, nil
 	end
 
 	local actualType = getValueType(value)
