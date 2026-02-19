@@ -1,5 +1,5 @@
 name = "lithhash/packet"
-version = "0.1.21"
+version = "0.1.22"
 description = "Packet, a pragmatic roblox networking library. "
 authors = ["LithHash"]
 repository = "https://github.com/LithHash/Packet"
