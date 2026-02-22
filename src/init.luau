@@ -437,7 +437,7 @@ local function compilePrimitive(primitiveType: packetType): compiledType
                 local t = typeof(value)
 
                 if value == nil then
-                    buffer.writeu8(targetBuffer, offset, 0)  -- nil
+                    buffer.writeu8(targetBuffer, offset, 0)
                     return offset + 1
                 elseif t == "number" then
                     buffer.writeu8(targetBuffer, offset, 1)
@@ -511,13 +511,47 @@ local function compilePrimitive(primitiveType: packetType): compiledType
                     buffer.copy(targetBuffer, offset + 5, value, 0, len)
                     return offset + 5 + len
                 elseif t == "table" then
-                    buffer.writeu8(targetBuffer, offset, 9)
+                    local sub = compilePrimitive("variant")
                     local count = #value
-                    buffer.writeu16(targetBuffer, offset + 1, count)
-                    local newOffset = offset + 1 + 2
-                    for i = 1, count do
-                        local sub = compilePrimitive("variant")
-                        newOffset = sub.write(targetBuffer, newOffset, value[i])
+                    local isArray = true
+
+                    for key in value do
+                        if type(key) ~= "number" or key < 1 or key % 1 ~= 0 or key > count then
+                            isArray = false
+                            break
+                        end
+                    end
+
+                    if isArray then
+                        for i = 1, count do
+                            if rawget(value, i) == nil then
+                                isArray = false
+                                break
+                            end
+                        end
+                    end
+
+                    if isArray then
+                        buffer.writeu8(targetBuffer, offset, 9)
+                        buffer.writeu16(targetBuffer, offset + 1, count)
+                        local newOffset = offset + 3
+                        for i = 1, count do
+                            newOffset = sub.write(targetBuffer, newOffset, value[i])
+                        end
+                        return newOffset
+                    end
+
+                    buffer.writeu8(targetBuffer, offset, 11)
+                    local pairCount = 0
+                    for _ in value do
+                        pairCount += 1
+                    end
+                    buffer.writeu16(targetBuffer, offset + 1, pairCount)
+
+                    local newOffset = offset + 3
+                    for key, entryValue in value do
+                        newOffset = sub.write(targetBuffer, newOffset, key)
+                        newOffset = sub.write(targetBuffer, newOffset, entryValue)
                     end
                     return newOffset
 
@@ -589,6 +623,28 @@ local function compilePrimitive(primitiveType: packetType): compiledType
                         arr[i], offset = sub.read(sourceBuffer, offset)
                     end
                     return arr, offset
+                end
+
+                if tag == 11 then
+                    local count = buffer.readu16(sourceBuffer, offset)
+                    offset += 2
+                    local dict = {}
+                    local sub = compilePrimitive("variant")
+
+                    for _ = 1, count do
+                        local entryKey
+                        local entryValue
+                        entryKey, offset = sub.read(sourceBuffer, offset)
+                        entryValue, offset = sub.read(sourceBuffer, offset)
+
+                        if entryKey ~= nil then
+                            dict[entryKey] = entryValue
+                        else
+                            warn("[packet] variant dictionary entry decoded as nil key and was dropped")
+                        end
+                    end
+
+                    return dict, offset
                 end
 
                 if tag == 10 then
